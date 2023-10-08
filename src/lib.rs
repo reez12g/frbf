@@ -45,7 +45,11 @@ impl BloomFilter {
 
     // Generate hash values for double hashing
     fn hash_values<T: Hash>(&self, item: &T) -> (usize, usize) {
-        let mut hashers: Vec<_> = self.hashes.iter().map(|state| state.build_hasher()).collect();
+        let mut hashers: Vec<_> = self
+            .hashes
+            .iter()
+            .map(|state| state.build_hasher())
+            .collect();
         item.hash(&mut hashers[0]);
         item.hash(&mut hashers[1]);
         (hashers[0].finish() as usize, hashers[1].finish() as usize)
