@@ -1,4 +1,6 @@
 use std::cmp;
+use std::error::Error;
+use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
 
 use ahash::RandomState;
@@ -14,20 +16,30 @@ pub struct BloomFilter {
 
 impl BloomFilter {
     // Create new bloom filter
-    pub fn new(n: usize, false_positive_probability: f64) -> Self {
+    pub fn new(n: usize, false_positive_probability: f64) -> Result<Self, BloomFilterError> {
+        if false_positive_probability <= 0.0 || false_positive_probability >= 1.0 {
+            return Err(BloomFilterError::InvalidProbability);
+        }
+
         let m = Self::optimal_m(n, false_positive_probability);
         let k = Self::optimal_k(m, n);
         let bitvec = bitvec![0; m];
+
+        if bitvec.capacity() < m {
+            return Err(BloomFilterError::MemoryAllocationFailed);
+        }
+
         let hashes = [
             RandomState::with_seeds(0, 0, 0, 0),
             RandomState::with_seeds(1, 1, 1, 1),
         ];
-        Self {
+
+        Ok(Self {
             bitvec,
             m,
             k,
             hashes,
-        }
+        })
     }
 
     // Calculate optimal number of bit maps
@@ -76,6 +88,28 @@ impl BloomFilter {
     }
 }
 
+#[derive(Debug)]
+pub enum BloomFilterError {
+    InvalidProbability,
+    MemoryAllocationFailed,
+}
+
+impl fmt::Display for BloomFilterError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            BloomFilterError::InvalidProbability => write!(
+                f,
+                "Invalid false_positive_probability provided. It should be between 0 and 1."
+            ),
+            BloomFilterError::MemoryAllocationFailed => {
+                write!(f, "Failed to allocate memory for the BloomFilter.")
+            }
+        }
+    }
+}
+
+impl Error for BloomFilterError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,7 +117,10 @@ mod tests {
 
     #[test]
     fn test_bloom_filter() {
-        let mut bloom_filter = BloomFilter::new(1000, 0.01);
+        let bloom_filter_result = BloomFilter::new(1000, 0.01);
+        assert!(bloom_filter_result.is_ok());
+
+        let mut bloom_filter = bloom_filter_result.unwrap();
 
         // Add items to the bloom filter
         bloom_filter.add(&"hello");
@@ -133,7 +170,11 @@ mod tests {
     fn performance_test() {
         let n = 1_000_000;
         let false_positive_probability = 0.01;
-        let mut bloom_filter = BloomFilter::new(n, false_positive_probability);
+
+        let bloom_filter_result = BloomFilter::new(n, false_positive_probability);
+        assert!(bloom_filter_result.is_ok());
+
+        let mut bloom_filter = bloom_filter_result.unwrap();
 
         // Performance test for `add` method
         let start = Instant::now();
@@ -150,5 +191,12 @@ mod tests {
         }
         let duration = start.elapsed();
         println!("Time taken to check {} items: {:?}", n, duration);
+    }
+
+    #[test]
+    fn test_invalid_probability() {
+        // This should fail because the false_positive_probability is not between 0 and 1
+        let bloom_filter_result = BloomFilter::new(1000, -0.01);
+        assert!(bloom_filter_result.is_err());
     }
 }
