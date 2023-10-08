@@ -75,6 +75,7 @@ impl BloomFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn test_bloom_filter() {
@@ -122,5 +123,28 @@ mod tests {
 
         // Check if non-existent item is not present in the bloom filter
         assert!(!bloom_filter.check(&"quux"));
+    }
+
+    #[test]
+    fn performance_test() {
+        let n = 1_000_000;
+        let false_positive_probability = 0.001;
+        let mut bloom_filter = BloomFilter::new(n, false_positive_probability);
+
+        // Performance test for `add` method
+        let start = Instant::now();
+        for i in 0..n {
+            bloom_filter.add(&i.to_string());
+        }
+        let duration = start.elapsed();
+        println!("Time taken to add {} items: {:?}", n, duration);
+
+        // Performance test for `check` method
+        let start = Instant::now();
+        for i in 0..n {
+            bloom_filter.check(&i.to_string());
+        }
+        let duration = start.elapsed();
+        println!("Time taken to check {} items: {:?}", n, duration);
     }
 }
