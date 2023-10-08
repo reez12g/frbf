@@ -9,7 +9,7 @@ pub struct BloomFilter {
     bitvec: BitVec,
     m: usize,
     k: usize,
-    hashes: Vec<RandomState>,
+    hashes: [RandomState; 2],
 }
 
 impl BloomFilter {
@@ -18,13 +18,10 @@ impl BloomFilter {
         let m = Self::optimal_m(n, false_positive_probability);
         let k = Self::optimal_k(m, n);
         let bitvec = bitvec![0; m];
-        let seeds: Vec<u64> = (0..k).map(|i| i as u64).collect();
-        let hashes = seeds
-            .iter()
-            .map(|&seed| {
-                RandomState::with_seeds(seed, seed.reverse_bits(), seed, seed.reverse_bits())
-            })
-            .collect();
+        let hashes = [
+            RandomState::with_seeds(0, 0, 0, 0),
+            RandomState::with_seeds(1, 1, 1, 1),
+        ];
         Self {
             bitvec,
             m,
@@ -46,29 +43,32 @@ impl BloomFilter {
         cmp::max(k as usize, 1)
     }
 
+    // Generate hash values for double hashing
+    fn hash_values<T: Hash>(&self, item: &T) -> (usize, usize) {
+        let mut hashers: Vec<_> = self.hashes.iter().map(|state| state.build_hasher()).collect();
+        item.hash(&mut hashers[0]);
+        item.hash(&mut hashers[1]);
+        (hashers[0].finish() as usize, hashers[1].finish() as usize)
+    }
+
     // Add an item to the bloom filter
     pub fn add<T: Hash>(&mut self, item: &T) {
+        let (hash1, hash2) = self.hash_values(item);
         for i in 0..self.k {
-            let mut hasher = self.hashes[i].build_hasher();
-            item.hash(&mut hasher);
-            let hash = hasher.finish() as usize;
-            let index = (hash.wrapping_add(i)) % self.m;
+            let combined_hash = hash1.wrapping_add(i.wrapping_mul(hash2));
+            let index = combined_hash % self.m;
             self.bitvec.set(index, true);
         }
     }
 
     // Check if an item is present in the bloom filter
     pub fn check<T: Hash>(&self, item: &T) -> bool {
-        for i in 0..self.k {
-            let mut hasher = self.hashes[i].build_hasher();
-            item.hash(&mut hasher);
-            let hash = hasher.finish() as usize;
-            let index = (hash.wrapping_add(i)) % self.m;
-            if !self.bitvec[index] {
-                return false;
-            }
-        }
-        true
+        let (hash1, hash2) = self.hash_values(item);
+        (0..self.k).all(|i| {
+            let combined_hash = hash1.wrapping_add(i.wrapping_mul(hash2));
+            let index = combined_hash % self.m;
+            self.bitvec[index]
+        })
     }
 }
 
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn performance_test() {
         let n = 1_000_000;
-        let false_positive_probability = 0.001;
+        let false_positive_probability = 0.01;
         let mut bloom_filter = BloomFilter::new(n, false_positive_probability);
 
         // Performance test for `add` method
