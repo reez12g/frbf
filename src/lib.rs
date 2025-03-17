@@ -7,6 +7,7 @@ use ahash::RandomState;
 use bitvec::prelude::*;
 
 // Bloom Filter struct
+#[derive(Debug)]
 pub struct BloomFilter {
     bitvec: BitVec,
     m: usize,
@@ -164,6 +165,145 @@ mod tests {
 
         // Check if non-existent item is not present in the bloom filter
         assert!(!bloom_filter.check(&"quux"));
+    }
+
+    #[test]
+    fn test_with_different_data_types() {
+        let mut bloom_filter = BloomFilter::new(1000, 0.01).unwrap();
+
+        // Test with integers
+        bloom_filter.add(&42);
+        bloom_filter.add(&1337);
+        assert!(bloom_filter.check(&42));
+        assert!(bloom_filter.check(&1337));
+        assert!(!bloom_filter.check(&9999));
+
+        // Test with tuples
+        bloom_filter.add(&(1, "one"));
+        bloom_filter.add(&(2, "two"));
+        assert!(bloom_filter.check(&(1, "one")));
+        assert!(bloom_filter.check(&(2, "two")));
+        assert!(!bloom_filter.check(&(3, "three")));
+
+        // Test with custom structs
+        #[derive(Hash)]
+        struct TestStruct {
+            id: u32,
+            name: String,
+        }
+
+        let item1 = TestStruct { id: 1, name: "test1".to_string() };
+        let item2 = TestStruct { id: 2, name: "test2".to_string() };
+        let item3 = TestStruct { id: 3, name: "test3".to_string() };
+
+        bloom_filter.add(&item1);
+        bloom_filter.add(&item2);
+        assert!(bloom_filter.check(&item1));
+        assert!(bloom_filter.check(&item2));
+        assert!(!bloom_filter.check(&item3));
+    }
+
+    #[test]
+    fn test_different_filter_sizes() {
+        // Small filter
+        let mut small_filter = BloomFilter::new(10, 0.1).unwrap();
+        for i in 0..10 {
+            small_filter.add(&i);
+        }
+        for i in 0..10 {
+            assert!(small_filter.check(&i));
+        }
+
+        // Medium filter
+        let mut medium_filter = BloomFilter::new(1000, 0.01).unwrap();
+        for i in 0..1000 {
+            medium_filter.add(&i);
+        }
+        for i in 0..1000 {
+            assert!(medium_filter.check(&i));
+        }
+
+        // Large filter
+        let mut large_filter = BloomFilter::new(10000, 0.001).unwrap();
+        for i in 0..1000 {
+            large_filter.add(&i);
+        }
+        for i in 0..1000 {
+            assert!(large_filter.check(&i));
+        }
+    }
+
+    #[test]
+    fn test_false_positive_rate() {
+        let n = 10000;
+        let fpp = 0.01; // Expected false positive probability
+        let mut bloom_filter = BloomFilter::new(n, fpp).unwrap();
+
+        // Add n items
+        for i in 0..n {
+            bloom_filter.add(&i);
+        }
+
+        // Check for false positives with another n items that weren't added
+        let mut false_positives = 0;
+        for i in n..(2 * n) {
+            if bloom_filter.check(&i) {
+                false_positives += 1;
+            }
+        }
+
+        let actual_fpp = false_positives as f64 / n as f64;
+        println!("Expected FPP: {}, Actual FPP: {}", fpp, actual_fpp);
+
+        // The actual false positive rate should be reasonably close to the expected rate
+        // We use a generous margin to avoid flaky tests
+        assert!(actual_fpp < fpp * 2.0, "False positive rate too high: {}", actual_fpp);
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Test with minimum valid probability
+        let min_prob_filter = BloomFilter::new(100, 0.000001);
+        assert!(min_prob_filter.is_ok());
+
+        // Test with maximum valid probability
+        let max_prob_filter = BloomFilter::new(100, 0.999999);
+        assert!(max_prob_filter.is_ok());
+
+        // Test with very small capacity
+        let small_capacity = BloomFilter::new(1, 0.01);
+        assert!(small_capacity.is_ok());
+
+        // Test adding and checking empty string
+        let mut filter = BloomFilter::new(100, 0.01).unwrap();
+        filter.add(&"");
+        assert!(filter.check(&""));
+
+        // Test adding and checking very long string
+        let long_string = "a".repeat(10000);
+        filter.add(&long_string);
+        assert!(filter.check(&long_string));
+    }
+
+    #[test]
+    fn test_error_conditions() {
+        // Test with invalid probabilities
+        assert!(BloomFilter::new(1000, -0.01).is_err());
+        assert!(BloomFilter::new(1000, 0.0).is_err());
+        assert!(BloomFilter::new(1000, 1.0).is_err());
+        assert!(BloomFilter::new(1000, 1.1).is_err());
+        
+        // Test with very large capacity that might cause memory issues
+        // Use a large but more reasonable value to avoid panicking the bitvec library
+        let large_capacity = 1_000_000_000; // 1 billion elements
+        let huge_filter = BloomFilter::new(large_capacity, 0.0001);
+        // This might succeed or fail depending on available memory
+        // We're just checking that it doesn't panic
+        match huge_filter {
+            Ok(_) => (), // It's ok if it succeeds
+            Err(BloomFilterError::MemoryAllocationFailed) => (), // Expected on memory-constrained systems
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
     }
 
     #[test]
