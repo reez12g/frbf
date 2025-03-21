@@ -6,6 +6,9 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use ahash::RandomState;
 use bitvec::prelude::*;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 /// Error types that can occur when working with a bloom filter
 #[derive(Debug)]
 pub enum BloomFilterError {
@@ -13,6 +16,8 @@ pub enum BloomFilterError {
     InvalidProbability,
     /// Failed to allocate memory for the bloom filter's bit vector
     MemoryAllocationFailed,
+    /// Bloom filters are not compatible for merging (different sizes or hash counts)
+    IncompatibleFilters,
 }
 
 impl fmt::Display for BloomFilterError {
@@ -24,6 +29,9 @@ impl fmt::Display for BloomFilterError {
             ),
             BloomFilterError::MemoryAllocationFailed => {
                 write!(f, "Failed to allocate memory for the BloomFilter.")
+            },
+            BloomFilterError::IncompatibleFilters => {
+                write!(f, "Bloom filters are not compatible for merging (different sizes or hash counts).")
             }
         }
     }
@@ -54,7 +62,8 @@ impl Default for HashConfig {
 /// False positive matches are possible, but false negatives are not.
 /// Elements can be added to the set, but not removed.
 /// The more elements that are added to the set, the larger the probability of false positives.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct BloomFilter {
     /// The bit vector that stores the bloom filter's data
     bit_array: BitVec,
@@ -64,6 +73,10 @@ pub struct BloomFilter {
     hash_count: usize,
     /// The hash functions used for double hashing
     hash_functions: [RandomState; 2],
+    /// The expected number of elements to be inserted
+    expected_elements: usize,
+    /// The number of elements that have been added (estimated)
+    inserted_elements: usize,
 }
 
 impl BloomFilter {
@@ -141,6 +154,8 @@ impl BloomFilter {
             bit_size,
             hash_count,
             hash_functions,
+            expected_elements,
+            inserted_elements: 0,
         })
     }
 
@@ -183,6 +198,102 @@ impl BloomFilter {
             let index = self.index_for_hash(hash1, hash2, i);
             self.bit_array.set(index, true);
         }
+
+        self.inserted_elements += 1;
+    }
+
+    /// Clears the bloom filter by resetting all bits to 0
+    ///
+    /// This operation resets the filter to its initial state without reallocating memory.
+    pub fn clear(&mut self) {
+        self.bit_array.fill(false);
+        self.inserted_elements = 0;
+    }
+
+    /// Merges another bloom filter into this one
+    ///
+    /// Both filters must have the same bit size and hash count to be compatible.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other bloom filter to merge with
+    ///
+    /// # Returns
+    ///
+    /// A result indicating success or an error if the filters are incompatible
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use frbf::BloomFilter;
+    ///
+    /// let mut filter1 = BloomFilter::new(1000, 0.01).unwrap();
+    /// let mut filter2 = BloomFilter::new(1000, 0.01).unwrap();
+    ///
+    /// filter1.add(&"hello");
+    /// filter2.add(&"world");
+    ///
+    /// filter1.merge(&filter2).unwrap();
+    ///
+    /// assert!(filter1.check(&"hello"));
+    /// assert!(filter1.check(&"world"));
+    /// ```
+    pub fn merge(&mut self, other: &Self) -> Result<(), BloomFilterError> {
+        // Check if the filters are compatible
+        if self.bit_size != other.bit_size || self.hash_count != other.hash_count {
+            return Err(BloomFilterError::IncompatibleFilters);
+        }
+
+        // Merge the bit arrays using bitwise OR
+        for i in 0..self.bit_array.len() {
+            if other.bit_array[i] {
+                self.bit_array.set(i, true);
+            }
+        }
+
+        // Update the inserted elements count
+        self.inserted_elements += other.inserted_elements;
+
+        Ok(())
+    }
+
+    /// Estimates the number of elements in the bloom filter
+    ///
+    /// This is an approximation based on the number of bits set in the filter.
+    ///
+    /// # Returns
+    ///
+    /// The estimated number of elements in the filter
+    pub fn estimate_elements(&self) -> usize {
+        // Count the number of bits set to 1
+        let bits_set = self.bit_array.count_ones();
+
+        // Use the formula: n = -m * ln(1 - X/m) / k
+        // where m is the bit size, X is the number of bits set to 1, and k is the number of hash functions
+        let m = self.bit_size as f64;
+        let x = bits_set as f64;
+        let k = self.hash_count as f64;
+
+        let estimate = -m * (1.0 - x / m).ln() / k;
+        estimate.round() as usize
+    }
+
+    /// Estimates the current false positive probability
+    ///
+    /// This is an approximation based on the number of bits set in the filter.
+    ///
+    /// # Returns
+    ///
+    /// The estimated false positive probability
+    pub fn estimate_false_positive_rate(&self) -> f64 {
+        // Count the number of bits set to 1
+        let bits_set = self.bit_array.count_ones();
+
+        // Calculate the probability that a bit is still 0
+        let p = 1.0 - (bits_set as f64 / self.bit_size as f64);
+
+        // The false positive probability is (1 - p)^k
+        (1.0 - p).powf(self.hash_count as f64)
     }
 
     /// Check if an item might be in the bloom filter
@@ -220,6 +331,95 @@ impl BloomFilter {
     /// Returns the number of hash functions being used
     pub fn hash_count(&self) -> usize {
         self.hash_count
+    }
+
+    /// Returns the expected number of elements the filter was configured for
+    pub fn expected_elements(&self) -> usize {
+        self.expected_elements
+    }
+
+    /// Returns the number of elements that have been added to the filter
+    pub fn inserted_elements(&self) -> usize {
+        self.inserted_elements
+    }
+}
+
+/// Builder for creating a BloomFilter with custom configuration
+pub struct BloomFilterBuilder {
+    expected_elements: usize,
+    false_positive_probability: f64,
+    hash_config: HashConfig,
+}
+
+impl BloomFilterBuilder {
+    /// Creates a new builder with default values
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_elements` - The expected number of elements to be inserted
+    pub fn new(expected_elements: usize) -> Self {
+        Self {
+            expected_elements,
+            false_positive_probability: 0.01, // Default 1% false positive rate
+            hash_config: HashConfig::default(),
+        }
+    }
+
+    /// Sets the desired false positive probability
+    ///
+    /// # Arguments
+    ///
+    /// * `probability` - The desired false positive probability (between 0 and 1)
+    ///
+    /// # Returns
+    ///
+    /// The builder for method chaining
+    pub fn false_positive_probability(mut self, probability: f64) -> Self {
+        self.false_positive_probability = probability;
+        self
+    }
+
+    /// Sets custom hash function seeds
+    ///
+    /// # Arguments
+    ///
+    /// * `h1_seed` - Seed for the first hash function
+    /// * `h2_seed` - Seed for the second hash function
+    ///
+    /// # Returns
+    ///
+    /// The builder for method chaining
+    pub fn hash_seeds(mut self, h1_seed: [u64; 4], h2_seed: [u64; 4]) -> Self {
+        self.hash_config.h1_seed = h1_seed;
+        self.hash_config.h2_seed = h2_seed;
+        self
+    }
+
+    /// Builds the BloomFilter with the configured parameters
+    ///
+    /// # Returns
+    ///
+    /// A result containing the new BloomFilter or an error
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use frbf::BloomFilterBuilder;
+    ///
+    /// let mut filter = BloomFilterBuilder::new(1000)
+    ///     .false_positive_probability(0.001)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// filter.add(&"hello");
+    /// assert!(filter.check(&"hello"));
+    /// ```
+    pub fn build(self) -> Result<BloomFilter, BloomFilterError> {
+        BloomFilter::with_config(
+            self.expected_elements,
+            self.false_positive_probability,
+            self.hash_config,
+        )
     }
 }
 
@@ -457,5 +657,143 @@ mod tests {
         // This should fail because the false_positive_probability is not between 0 and 1
         let bloom_filter_result = BloomFilter::new(1000, -0.01);
         assert!(bloom_filter_result.is_err());
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut filter = BloomFilter::new(100, 0.01).unwrap();
+
+        // Add some items
+        filter.add(&"hello");
+        filter.add(&"world");
+
+        // Verify they're in the filter
+        assert!(filter.check(&"hello"));
+        assert!(filter.check(&"world"));
+
+        // Clear the filter
+        filter.clear();
+
+        // Verify items are no longer in the filter
+        assert!(!filter.check(&"hello"));
+        assert!(!filter.check(&"world"));
+
+        // Add items again to verify the filter still works
+        filter.add(&"foo");
+        filter.add(&"bar");
+
+        assert!(filter.check(&"foo"));
+        assert!(filter.check(&"bar"));
+    }
+
+    #[test]
+    fn test_merge() {
+        let mut filter1 = BloomFilter::new(100, 0.01).unwrap();
+        let mut filter2 = BloomFilter::new(100, 0.01).unwrap();
+
+        // Add different items to each filter
+        filter1.add(&"hello");
+        filter1.add(&"world");
+
+        filter2.add(&"foo");
+        filter2.add(&"bar");
+
+        // Verify items are in their respective filters
+        assert!(filter1.check(&"hello"));
+        assert!(filter1.check(&"world"));
+        assert!(!filter1.check(&"foo"));
+        assert!(!filter1.check(&"bar"));
+
+        assert!(!filter2.check(&"hello"));
+        assert!(!filter2.check(&"world"));
+        assert!(filter2.check(&"foo"));
+        assert!(filter2.check(&"bar"));
+
+        // Merge filter2 into filter1
+        let merge_result = filter1.merge(&filter2);
+        assert!(merge_result.is_ok());
+
+        // Verify all items are now in filter1
+        assert!(filter1.check(&"hello"));
+        assert!(filter1.check(&"world"));
+        assert!(filter1.check(&"foo"));
+        assert!(filter1.check(&"bar"));
+
+        // Verify filter2 is unchanged
+        assert!(!filter2.check(&"hello"));
+        assert!(!filter2.check(&"world"));
+        assert!(filter2.check(&"foo"));
+        assert!(filter2.check(&"bar"));
+
+        // Test incompatible filters
+        let filter3 = BloomFilter::new(200, 0.001).unwrap(); // Different parameters
+        let merge_result = filter1.merge(&filter3);
+        assert!(merge_result.is_err());
+        match merge_result {
+            Err(BloomFilterError::IncompatibleFilters) => (), // Expected
+            _ => panic!("Expected IncompatibleFilters error"),
+        }
+    }
+
+    #[test]
+    fn test_estimation_methods() {
+        let n = 1000;
+        let mut filter = BloomFilter::new(n, 0.01).unwrap();
+
+        // Initially the filter should be empty
+        assert_eq!(filter.estimate_elements(), 0);
+
+        // Add some elements
+        for i in 0..n {
+            filter.add(&i);
+        }
+
+        // The estimated count should be reasonably close to the actual count
+        let estimated = filter.estimate_elements();
+        let error_margin = 0.1; // Allow 10% error
+        assert!(
+            (estimated as f64) > (n as f64) * (1.0 - error_margin) &&
+            (estimated as f64) < (n as f64) * (1.0 + error_margin),
+            "Estimated count {} is too far from actual count {}",
+            estimated,
+            n
+        );
+
+        // The estimated FPP should be reasonable
+        let estimated_fpp = filter.estimate_false_positive_rate();
+        assert!(estimated_fpp > 0.0 && estimated_fpp < 0.1); // Should be positive but small
+    }
+
+    #[test]
+    fn test_builder_pattern() {
+        // Test basic builder usage
+        let mut filter = BloomFilterBuilder::new(1000)
+            .false_positive_probability(0.001)
+            .build()
+            .unwrap();
+
+        filter.add(&"hello");
+        assert!(filter.check(&"hello"));
+
+        // Test with custom hash seeds
+        let mut filter = BloomFilterBuilder::new(1000)
+            .false_positive_probability(0.01)
+            .hash_seeds([42, 43, 44, 45], [99, 98, 97, 96])
+            .build()
+            .unwrap();
+
+        filter.add(&"world");
+        assert!(filter.check(&"world"));
+
+        // Test invalid probability
+        let result = BloomFilterBuilder::new(1000)
+            .false_positive_probability(1.5) // Invalid
+            .build();
+
+        assert!(result.is_err());
+        match result {
+            Err(BloomFilterError::InvalidProbability) => (), // Expected
+            _ => panic!("Expected InvalidProbability error"),
+        }
     }
 }
