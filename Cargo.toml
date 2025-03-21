@@ -4,9 +4,19 @@ version = "0.1.0"
 edition = "2021"
 description = "A simple, robust, and efficient implementation of the Bloom Filter data structure in Rust."
 license = "MIT"
+authors = ["FRBF Contributors"]
+repository = "https://github.com/username/frbf"
+keywords = ["bloom-filter", "probabilistic", "data-structure"]
+categories = ["data-structures", "algorithms"]
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 bitvec = "1.0.1"
 ahash = "0.8.3"
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde-support = ["serde", "bitvec/serde"]

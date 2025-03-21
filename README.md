@@ -1,6 +1,6 @@
 # FRBF: Fast Rust Bloom Filter
 
-A high-performance, well-documented Bloom Filter implementation in Rust with configurable parameters and comprehensive error handling.
+A high-performance, well-documented Bloom Filter implementation in Rust with configurable parameters, comprehensive error handling, and advanced features.
 
 ## Overview
 
@@ -15,6 +15,11 @@ A Bloom Filter is a space-efficient probabilistic data structure designed to tes
 - Well-documented API with usage examples
 - Extensive test suite
 - Support for any hashable type
+- Builder pattern for flexible initialization
+- Serialization/deserialization support (optional)
+- Ability to clear the filter without reallocation
+- Merge operation for combining compatible filters
+- Element count and false positive rate estimation
 
 ## Installation
 
@@ -98,6 +103,12 @@ let bit_size = bloom_filter.bit_size();
 
 // Get the number of hash functions
 let hash_count = bloom_filter.hash_count();
+
+// Get the expected number of elements
+let expected = bloom_filter.expected_elements();
+
+// Get the number of elements that have been added
+let inserted = bloom_filter.inserted_elements();
 ```
 
 ## Performance Considerations
@@ -114,12 +125,112 @@ For optimal performance, choose the expected number of elements and false positi
 
 ## Error Handling
 
-The implementation returns a `Result` type when creating a new Bloom Filter, which can contain the following errors:
+The implementation returns a `Result` type when creating a new Bloom Filter or performing operations like merging, which can contain the following errors:
 
 - `BloomFilterError::InvalidProbability` - When the false positive probability is not between 0 and 1
 - `BloomFilterError::MemoryAllocationFailed` - When memory allocation for the bit array fails
+- `BloomFilterError::IncompatibleFilters` - When attempting to merge filters with different bit sizes or hash counts
 
 ## Advanced Usage
+
+### Using the Builder Pattern
+
+For more flexible initialization, you can use the builder pattern:
+
+```rust
+use frbf::BloomFilterBuilder;
+
+let mut filter = BloomFilterBuilder::new(1000)
+    .false_positive_probability(0.001)
+    .hash_seeds([42, 43, 44, 45], [99, 98, 97, 96]) // Custom hash seeds
+    .build()
+    .unwrap();
+
+filter.add(&"hello");
+assert!(filter.check(&"hello"));
+```
+
+### Clearing the Filter
+
+You can clear the filter without reallocating memory:
+
+```rust
+// Add some items
+filter.add(&"hello");
+filter.add(&"world");
+
+// Clear the filter
+filter.clear();
+
+// The filter is now empty
+assert!(!filter.check(&"hello"));
+assert!(!filter.check(&"world"));
+```
+
+### Merging Filters
+
+You can merge two compatible bloom filters:
+
+```rust
+let mut filter1 = BloomFilter::new(1000, 0.01).unwrap();
+let mut filter2 = BloomFilter::new(1000, 0.01).unwrap();
+
+filter1.add(&"hello");
+filter2.add(&"world");
+
+// Merge filter2 into filter1
+filter1.merge(&filter2).unwrap();
+
+// filter1 now contains items from both filters
+assert!(filter1.check(&"hello"));
+assert!(filter1.check(&"world"));
+```
+
+### Estimating Elements and False Positive Rate
+
+You can estimate the number of elements in the filter and the current false positive rate:
+
+```rust
+// Add some elements
+for i in 0..1000 {
+    filter.add(&i);
+}
+
+// Estimate the number of elements
+let estimated_count = filter.estimate_elements();
+println!("Estimated element count: {}", estimated_count);
+
+// Estimate the current false positive rate
+let estimated_fpp = filter.estimate_false_positive_rate();
+println!("Estimated false positive rate: {}", estimated_fpp);
+```
+
+### Serialization and Deserialization
+
+To enable serialization support, add the `serde-support` feature to your `Cargo.toml`:
+
+```toml
+[dependencies]
+frbf = { version = "0.1.0", features = ["serde-support"] }
+```
+
+Then you can serialize and deserialize the bloom filter:
+
+```rust
+use serde_json;
+
+let mut filter = BloomFilter::new(1000, 0.01).unwrap();
+filter.add(&"hello");
+
+// Serialize
+let serialized = serde_json::to_string(&filter).unwrap();
+
+// Deserialize
+let deserialized: BloomFilter = serde_json::from_str(&serialized).unwrap();
+
+// The deserialized filter contains the same elements
+assert!(deserialized.check(&"hello"));
+```
 
 ### Calculating the Actual False Positive Rate
 
